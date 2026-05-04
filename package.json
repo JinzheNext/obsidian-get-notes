@@ -1,0 +1,25 @@
+{
+  "name": "obsidian-get-notes",
+  "version": "0.1.0",
+  "description": "Obsidian plugin to sync Get Notes into your vault",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "check": "tsc --noEmit"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "get-notes"
+  ],
+  "author": "Jerry Shan",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.25.12",
+    "obsidian": "^1.8.10",
+    "typescript": "^5.9.3"
+  }
+}
