@@ -11,6 +11,22 @@ function hasSmartSummary(detail: GetNoteDetail | null): boolean {
   return text.startsWith("### 📑 智能总结") || text.includes("### ✨ 金句精选") || text.includes("### 📋 待办事项");
 }
 
+function displayType(noteType?: string): string {
+  switch (noteType) {
+    case "meeting":
+      return "录音会议";
+    case "audio":
+    case "local_audio":
+      return "录音笔记";
+    case "link":
+      return "链接摘抄";
+    case "plain_text":
+      return "纯文本笔记";
+    default:
+      return noteType || "未知";
+  }
+}
+
 function summaryMarkdown(record: RawNoteRecord): string {
   const candidate = normalizeText(record.summary.content || record.detail?.content);
   if (!candidate) return "";
@@ -31,6 +47,9 @@ function bodyMarkdown(detail: GetNoteDetail | null): string {
 function unavailableContentMessage(noteType: string | undefined): string {
   if (noteType === "audio" || noteType === "local_audio" || noteType === "meeting") {
     return "_当前 API 数据中暂未提供完整原文转写内容。_";
+  }
+  if (noteType === "link") {
+    return "_当前 API 数据中暂未提供可单独渲染的链接原文，当前仅保留摘要和原始链接。_";
   }
   return "_当前 API 数据中暂未提供可单独渲染的原文内容。_";
 }
@@ -55,10 +74,11 @@ function originalReference(detail: GetNoteDetail | null): string {
 
 function buildOverview(detail: GetNoteDetail | null, summary: GetNoteSummary, audioLinks: string[]): string {
   const attachments = Array.isArray(detail?.attachments) ? detail.attachments : [];
+  const noteType = detail?.note_type || summary.note_type || "";
   const lines = [
     "## 概览",
     "",
-    `- 类型: ${detail?.note_type || summary.note_type || "未知"}`,
+    `- 类型: ${displayType(noteType)}`,
     `- 来源: ${detail?.source || summary.source || "未知"}`,
     `- 入口类型: ${detail?.entry_type || "未知"}`,
     `- 创建时间: ${detail?.created_at || summary.created_at || "未知"}`,
@@ -120,6 +140,8 @@ export function renderMarkdown(record: RawNoteRecord, stem: string, audioLinks: 
   if (noteType === "plain_text" || noteType === "link") {
     if (body) {
       sections.push("## 笔记内容", "", body, "");
+    } else {
+      sections.push("## 笔记内容", "", unavailableContentMessage(noteType), "");
     }
     if (summary && !sameSummaryAndBody) {
       sections.push("## 智能总结", "", summary, "");

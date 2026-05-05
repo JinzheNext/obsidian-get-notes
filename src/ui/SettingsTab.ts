@@ -3,7 +3,6 @@ import GetNotesPlugin from "../../main";
 import { buildModeLabel } from "../sync/resultTypes";
 import { SyncMode } from "../types";
 import { formatSyncTime } from "../utils/time";
-import { resolveModeTargetFolder } from "../utils/modePaths";
 import { LegacyAuthModal } from "./LegacyAuthModal";
 import { showError, showInfo } from "./Notices";
 
@@ -98,7 +97,7 @@ export class GetNotesSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("目标目录")
-      .setDesc(`同步输出的基础目录。当前模式会写入：${resolveModeTargetFolder(this.plugin.settings.targetFolder, this.plugin.settings.syncMode)}`)
+      .setDesc(`同步输出的基础目录。两种模式都会写入同一套目录结构：${this.plugin.settings.targetFolder}`)
       .addText((text) =>
         text.setValue(this.plugin.settings.targetFolder).onChange(async (value) => {
           await this.plugin.updateSettings({ targetFolder: value.trim() || "00_Inbox/020 GetNotes" });

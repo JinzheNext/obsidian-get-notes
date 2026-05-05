@@ -31,4 +31,28 @@ export class RawCacheStore {
     const text = await this.app.vault.adapter.read(target);
     return JSON.parse(text) as RawNoteRecord;
   }
+
+  async readAll(): Promise<Array<{ noteId: string; payload: RawNoteRecord }>> {
+    if (!(await this.app.vault.adapter.exists(this.rootDir))) return [];
+    const listing = await this.app.vault.adapter.list(this.rootDir).catch(() => null);
+    if (!listing) return [];
+
+    const results: Array<{ noteId: string; payload: RawNoteRecord }> = [];
+    for (const filePath of listing.files) {
+      if (!filePath.endsWith(".json")) continue;
+      const noteId = filePath.split("/").pop()?.replace(/\.json$/, "") || "";
+      if (!noteId) continue;
+      const text = await this.app.vault.adapter.read(filePath).catch(() => "");
+      if (!text) continue;
+      try {
+        results.push({
+          noteId,
+          payload: JSON.parse(text) as RawNoteRecord
+        });
+      } catch (_error) {
+        continue;
+      }
+    }
+    return results;
+  }
 }

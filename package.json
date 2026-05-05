@@ -1,6 +1,6 @@
 {
   "name": "obsidian-get-notes",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Obsidian plugin to sync Get Notes into your vault",
   "main": "main.js",
   "scripts": {

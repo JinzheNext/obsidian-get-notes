@@ -1,7 +1,6 @@
 import { App, Plugin } from "obsidian";
-import { LegacySyncState, UnifiedSyncResult } from "../types";
+import { LegacySyncState, PluginSyncState, UnifiedSyncResult } from "../types";
 import { createUnifiedResult } from "../sync/resultTypes";
-import { resolveModeTargetFolder } from "../utils/modePaths";
 import { nowIso } from "../utils/time";
 import { GetNotesPluginSettings } from "../types";
 import { LegacyExporter } from "./exporter";
@@ -9,18 +8,19 @@ import { LegacyImporter } from "./importer";
 import { toLegacyUserMessage } from "./errors";
 import { LegacySyncStage } from "../types";
 import { legacyStageLog } from "./logger";
-import { legacyStageMessage } from "./progress";
+import { decodeLegacyProgress, legacyStageMessage } from "./progress";
 
 export class LegacySyncService {
   constructor(private app: App, private plugin: Plugin) {}
 
   async sync(
     settings: GetNotesPluginSettings,
+    state: PluginSyncState,
     legacyState: LegacySyncState,
     onProgress?: (stage: string) => void,
-  ): Promise<{ result: UnifiedSyncResult; legacyState: LegacySyncState }> {
+  ): Promise<{ result: UnifiedSyncResult; legacyState: LegacySyncState; state: PluginSyncState }> {
     const startedAt = nowIso();
-    const outputFolder = resolveModeTargetFolder(settings.targetFolder, "legacy");
+    const outputFolder = settings.targetFolder;
     const pluginDir = this.resolvePluginDir();
     let currentStage: LegacySyncStage = "starting";
     let failedAtStage: LegacySyncStage = currentStage;
@@ -30,19 +30,26 @@ export class LegacySyncService {
       legacyStageLog(currentStage, { outputFolder });
       await this.app.vault.adapter.mkdir(outputFolder).catch(() => undefined);
       const exporter = new LegacyExporter(pluginDir);
-      const exportResult = await exporter.export((stage) => {
-        currentStage = stage as LegacySyncStage;
-        failedAtStage = currentStage;
-        onProgress?.(legacyStageMessage(currentStage));
+      const exportResult = await exporter.export((signal) => {
+        const decoded = decodeLegacyProgress(signal);
+        if (decoded.stage) {
+          currentStage = decoded.stage;
+          failedAtStage = currentStage;
+        }
+        onProgress?.(decoded.message);
       });
       const importer = new LegacyImporter(this.app, {
+        pluginId: this.plugin.manifest.id,
         rawZipPath: exportResult.rawZipPath,
         targetFolder: outputFolder,
-        syncedNoteIds: legacyState.syncedNoteIds
-      }, (stage) => {
-        currentStage = stage as LegacySyncStage;
-        failedAtStage = currentStage;
-        onProgress?.(legacyStageMessage(currentStage));
+        state
+      }, (signal) => {
+        const decoded = decodeLegacyProgress(signal);
+        if (decoded.stage) {
+          currentStage = decoded.stage;
+          failedAtStage = currentStage;
+        }
+        onProgress?.(decoded.message);
       });
       const imported = await importer.import();
       currentStage = "completed";
@@ -55,23 +62,25 @@ export class LegacySyncService {
       };
       return {
         legacyState: nextLegacyState,
+        state: imported.state,
         result: createUnifiedResult({
           mode: "legacy",
           status: "success",
           startedAt,
           finishedAt: nowIso(),
           stage: currentStage,
-          added: imported.parsedNotes,
-          updated: undefined,
-          skipped: undefined,
-          total: imported.parsedNotes,
+          added: imported.addedNotes,
+          updated: imported.updatedNotes,
+          skipped: imported.skippedNotes,
+          total: imported.parsedNotes + imported.skippedNotes,
           outputFolder,
-          message: `普通登录模式已重建 ${imported.parsedNotes} 条笔记。`
+          message: `普通登录模式已同步 ${imported.parsedNotes} 条笔记，跳过 ${imported.skippedNotes} 条。`
         })
       };
     } catch (error) {
       currentStage = "failed";
       return {
+        state,
         legacyState: {
           ...legacyState,
           lastStage: failedAtStage,

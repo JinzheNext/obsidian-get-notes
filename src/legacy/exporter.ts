@@ -1,10 +1,13 @@
 import fs from "fs-extra";
 import http from "http";
 import https from "https";
+import { Readable } from "stream";
 import type { Locator, Page } from "playwright";
 import { LEGACY_AUTH_FILE, LEGACY_DOWNLOAD_FILE, GET_EXPORT_CANDIDATE_URLS, LEGACY_PLAYWRIGHT_CACHE_LOC } from "./const";
+import { cleanupLegacyCacheArtifacts } from "./cacheCleanup";
 import { LegacyExportError } from "./errors";
 import { legacyLog, legacyStageLog, legacyWarn } from "./logger";
+import { encodeLegacyProgress } from "./progress";
 import { loadPlaywright } from "./playwrightRuntime";
 
 type ExportTask = {
@@ -28,18 +31,38 @@ export interface LegacyExportResult {
   lastExportAt?: string;
 }
 
+const DOWNLOAD_PROGRESS_INTERVAL_MS = 1000;
+const DOWNLOAD_STALL_TIMEOUT_MS = 20_000;
+const MAX_DOWNLOAD_REDIRECTS = 5;
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatDownloadMessage(downloadedBytes: number, totalBytes?: number | null, speedBytesPerSec?: number): string {
+  const base = totalBytes && totalBytes > 0
+    ? `正在下载 ZIP：${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}（${((downloadedBytes / totalBytes) * 100).toFixed(1)}%）`
+    : `正在下载 ZIP：已下载 ${formatBytes(downloadedBytes)}`;
+  if (!speedBytesPerSec || speedBytesPerSec <= 0) return base;
+  return `${base}，速度约 ${formatBytes(speedBytesPerSec)}/s`;
+}
+
 export class LegacyExporter {
   constructor(private pluginDir: string) {}
 
   async export(onProgress?: (stage: string) => void): Promise<LegacyExportResult> {
     await fs.mkdirp(LEGACY_PLAYWRIGHT_CACHE_LOC);
+    await cleanupLegacyCacheArtifacts();
     if (!await fs.pathExists(LEGACY_AUTH_FILE)) {
       throw new LegacyExportError("LOGIN_REQUIRED", "Missing auth file");
     }
     await fs.remove(LEGACY_DOWNLOAD_FILE).catch(() => undefined);
 
     const playwright = loadPlaywright(this.pluginDir);
-    onProgress?.("opening_browser");
+    onProgress?.(encodeLegacyProgress("opening_browser"));
     legacyStageLog("opening_browser");
     const browser = await playwright.chromium.launch({ headless: true });
     try {
@@ -53,7 +76,7 @@ export class LegacyExporter {
         .catch(() => null);
 
       legacyLog("export start");
-      onProgress?.("checking_login");
+      onProgress?.(encodeLegacyProgress("checking_login"));
       legacyStageLog("checking_login");
       await this.openExportPage(page);
       await page.waitForLoadState("load");
@@ -62,27 +85,27 @@ export class LegacyExporter {
 
       if (latestTask?.access_url && latestTask.status === "success") {
         legacyLog("reuse latest export task", latestTask);
-        onProgress?.("opening_export_page");
+        onProgress?.(encodeLegacyProgress("opening_export_page"));
         legacyStageLog("opening_export_page", {
           lastExportAt: this.taskTimeToIso(latestTask),
           status: latestTask.status,
         });
         try {
-          onProgress?.("downloading_zip");
+          onProgress?.(encodeLegacyProgress("downloading_zip", "正在等待浏览器开始下载 ZIP..."));
           legacyStageLog("downloading_zip");
-          await this.downloadLatestExport(page);
+          await this.downloadLatestExport(page, onProgress);
         } catch (downloadError) {
           legacyWarn("page download fallback failed, try latest task access_url", downloadError instanceof Error ? downloadError.message : String(downloadError));
-          onProgress?.("downloading_zip");
+          onProgress?.(encodeLegacyProgress("downloading_zip", "浏览器下载未触发，正在改用直链下载 ZIP..."));
           legacyStageLog("downloading_zip", { fallback: "access_url" });
-          await this.downloadFromUrl(latestTask.access_url, LEGACY_DOWNLOAD_FILE);
+          await this.downloadFromUrl(latestTask.access_url, LEGACY_DOWNLOAD_FILE, onProgress);
         }
 
         if (!await fs.pathExists(LEGACY_DOWNLOAD_FILE)) {
           throw new LegacyExportError("ZIP_NOT_FOUND", "Latest export download did not produce a ZIP file");
         }
 
-        onProgress?.("verifying_zip");
+        onProgress?.(encodeLegacyProgress("verifying_zip"));
         legacyStageLog("verifying_zip");
         await this.verifyDownloadedZip();
         await context.close();
@@ -93,7 +116,7 @@ export class LegacyExporter {
       }
 
       const exportButton = await this.findExportButton(page);
-      onProgress?.("triggering_export");
+      onProgress?.(encodeLegacyProgress("triggering_export"));
       legacyStageLog("triggering_export");
       await exportButton.click({ timeout: 5000 });
       const createResponse = await page.waitForResponse(
@@ -107,37 +130,37 @@ export class LegacyExporter {
         if (latestTask?.access_url && latestTask.status === "success") {
           legacyWarn("export task id missing, fallback to latest export task", latestTask);
           try {
-            onProgress?.("downloading_zip");
+            onProgress?.(encodeLegacyProgress("downloading_zip", "导出任务未返回 task id，正在复用最近一次导出 ZIP..."));
             legacyStageLog("downloading_zip", { fallback: "latest_task_after_rate_limit" });
-            await this.downloadLatestExport(page);
+            await this.downloadLatestExport(page, onProgress);
           } catch (downloadError) {
             legacyWarn("page download fallback failed, try latest task access_url", downloadError instanceof Error ? downloadError.message : String(downloadError));
-            onProgress?.("downloading_zip");
+            onProgress?.(encodeLegacyProgress("downloading_zip", "浏览器下载未触发，正在改用直链下载最近一次导出 ZIP..."));
             legacyStageLog("downloading_zip", { fallback: "access_url_after_rate_limit" });
-            await this.downloadFromUrl(latestTask.access_url, LEGACY_DOWNLOAD_FILE);
+            await this.downloadFromUrl(latestTask.access_url, LEGACY_DOWNLOAD_FILE, onProgress);
           }
         } else {
           throw new LegacyExportError("DOWNLOAD_TIMEOUT", createPayload?.h?.e || "Export task id was not returned");
         }
       } else {
-        onProgress?.("waiting_for_export_task");
+        onProgress?.(encodeLegacyProgress("waiting_for_export_task"));
         legacyStageLog("waiting_for_export_task", { taskId });
-        const task = await this.waitForExportTask(page, taskId);
+        const task = await this.waitForExportTask(page, taskId, onProgress);
         if (task?.access_url) {
-          onProgress?.("downloading_zip");
+          onProgress?.(encodeLegacyProgress("downloading_zip", "导出任务已完成，正在下载 ZIP..."));
           legacyStageLog("downloading_zip");
-          await this.downloadFromUrl(task.access_url, LEGACY_DOWNLOAD_FILE);
+          await this.downloadFromUrl(task.access_url, LEGACY_DOWNLOAD_FILE, onProgress);
         } else {
-          onProgress?.("downloading_zip");
+          onProgress?.(encodeLegacyProgress("downloading_zip", "导出任务完成但未返回直链，正在尝试浏览器下载 ZIP..."));
           legacyStageLog("downloading_zip", { fallback: "download_control_after_task" });
-          await this.downloadLatestExport(page);
+          await this.downloadLatestExport(page, onProgress);
         }
       }
       if (!await fs.pathExists(LEGACY_DOWNLOAD_FILE)) {
         throw new LegacyExportError("ZIP_NOT_FOUND", "Download file missing after legacy download step");
       }
 
-      onProgress?.("verifying_zip");
+      onProgress?.(encodeLegacyProgress("verifying_zip"));
       legacyStageLog("verifying_zip");
       await this.verifyDownloadedZip();
       await context.close();
@@ -205,7 +228,7 @@ export class LegacyExporter {
     throw new LegacyExportError("EXPORT_BUTTON_NOT_FOUND", "Could not locate legacy export button");
   }
 
-  private async waitForExportTask(page: Page, taskId: string): Promise<ExportTask | null> {
+  private async waitForExportTask(page: Page, taskId: string, onProgress?: (stage: string) => void): Promise<ExportTask | null> {
     let completedWithoutUrlCount = 0;
     const startedAt = Date.now();
     while (Date.now() - startedAt < 5 * 60 * 1000) {
@@ -222,7 +245,11 @@ export class LegacyExporter {
         percent: task.result?.percent,
         hasAccessUrl: Boolean(task.access_url)
       });
-        if (task.access_url) return task;
+      const percent = typeof task.result?.percent === "number" ? task.result.percent : null;
+      if (percent !== null) {
+        onProgress?.(encodeLegacyProgress("waiting_for_export_task", `正在等待导出任务完成：${(percent * 100).toFixed(1)}%`));
+      }
+      if (task.access_url) return task;
       if (task.result?.percent === 1) {
         completedWithoutUrlCount += 1;
         if (completedWithoutUrlCount >= 5) return null;
@@ -251,7 +278,7 @@ export class LegacyExporter {
     }
   }
 
-  private async downloadLatestExport(page: Page): Promise<void> {
+  private async downloadLatestExport(page: Page, onProgress?: (stage: string) => void): Promise<void> {
     const downloadPromise = page.waitForEvent("download", { timeout: 30000 }).catch(() => null);
     let clicked = false;
     for (const candidate of [page.getByText("下载文件", { exact: true }), page.locator(".download-tip").first()]) {
@@ -275,30 +302,131 @@ export class LegacyExporter {
     if (!clicked) {
       throw new LegacyExportError("ZIP_NOT_FOUND", "Could not click the latest export download control");
     }
+    onProgress?.(encodeLegacyProgress("downloading_zip", "已点击下载，正在等待浏览器返回下载任务..."));
     const download = await downloadPromise;
     if (!download) {
       throw new LegacyExportError("DOWNLOAD_TIMEOUT", "Download event did not fire from the latest export control");
     }
-    await download.saveAs(LEGACY_DOWNLOAD_FILE);
+    const suggestedName = download.suggestedFilename() || "get_export.zip";
+    onProgress?.(encodeLegacyProgress("downloading_zip", `浏览器已开始下载：${suggestedName}`));
+
+    const downloadUrl = download.url();
+    if (downloadUrl) {
+      onProgress?.(encodeLegacyProgress("downloading_zip", `已获取下载链接，正在接管下载进度：${suggestedName}`));
+      await this.downloadFromUrl(downloadUrl, LEGACY_DOWNLOAD_FILE, onProgress);
+      return;
+    }
+
+    onProgress?.(
+      encodeLegacyProgress(
+        "downloading_zip",
+        `浏览器已开始下载，但当前无法读取实时字节进度：${suggestedName}`
+      )
+    );
+    const readable = await download.createReadStream();
+    if (!readable) {
+      throw new LegacyExportError("DOWNLOAD_TIMEOUT", "Could not create readable stream for the browser download");
+    }
+    await this.writeReadableToFile(readable, LEGACY_DOWNLOAD_FILE, null, onProgress);
   }
 
-  private async downloadFromUrl(url: string, filePath: string): Promise<void> {
+  private async downloadFromUrl(url: string, filePath: string, onProgress?: (stage: string) => void): Promise<void> {
+    await this.downloadFromUrlWithRedirects(url, filePath, onProgress, 0);
+  }
+
+  private async downloadFromUrlWithRedirects(
+    url: string,
+    filePath: string,
+    onProgress: ((stage: string) => void) | undefined,
+    redirectCount: number
+  ): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       const client = url.startsWith("https:") ? https : http;
       const request = client.get(url, (response) => {
-        if (response.statusCode && response.statusCode >= 400) {
-          reject(new LegacyExportError("ZIP_NOT_FOUND", `Download URL returned ${response.statusCode}`));
+        const statusCode = response.statusCode || 0;
+        const location = response.headers.location;
+        if (location && statusCode >= 300 && statusCode < 400) {
+          response.resume();
+          if (redirectCount >= MAX_DOWNLOAD_REDIRECTS) {
+            reject(new LegacyExportError("DOWNLOAD_TIMEOUT", `Too many download redirects for ${url}`));
+            return;
+          }
+          const nextUrl = new URL(location, url).toString();
+          this.downloadFromUrlWithRedirects(nextUrl, filePath, onProgress, redirectCount + 1).then(resolve).catch(reject);
           return;
         }
-        const stream = fs.createWriteStream(filePath);
-        response.pipe(stream);
-        stream.on("finish", () => {
-          stream.close();
-          resolve();
-        });
-        stream.on("error", reject);
+        if (statusCode >= 400) {
+          reject(new LegacyExportError("ZIP_NOT_FOUND", `Download URL returned ${statusCode}`));
+          return;
+        }
+        const totalBytes = Number.parseInt(String(response.headers["content-length"] || "0"), 10) || null;
+        this.writeReadableToFile(response, filePath, totalBytes, onProgress).then(resolve).catch(reject);
       });
       request.on("error", reject);
+    });
+  }
+
+  private async writeReadableToFile(
+    readable: Readable,
+    filePath: string,
+    totalBytes: number | null,
+    onProgress?: (stage: string) => void
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const stream = fs.createWriteStream(filePath);
+      let downloadedBytes = 0;
+      let lastReportedBytes = 0;
+      let lastProgressAt = Date.now();
+      let closed = false;
+
+      const clearTimers = (interval: NodeJS.Timeout): void => {
+        clearInterval(interval);
+      };
+
+      const interval = setInterval(() => {
+        const now = Date.now();
+        const fileBytes = fs.existsSync(filePath) ? fs.statSync(filePath).size : 0;
+        if (fileBytes > downloadedBytes) {
+          downloadedBytes = fileBytes;
+        }
+        if (downloadedBytes > lastReportedBytes) {
+          const deltaBytes = downloadedBytes - lastReportedBytes;
+          const elapsedSec = Math.max(1, (now - lastProgressAt) / 1000);
+          const speed = deltaBytes / elapsedSec;
+          lastReportedBytes = downloadedBytes;
+          lastProgressAt = now;
+          onProgress?.(encodeLegacyProgress("downloading_zip", formatDownloadMessage(downloadedBytes, totalBytes, speed)));
+          return;
+        }
+
+        if (!closed && now - lastProgressAt > DOWNLOAD_STALL_TIMEOUT_MS) {
+          clearTimers(interval);
+          readable.destroy();
+          stream.destroy();
+          reject(new LegacyExportError("DOWNLOAD_STALLED", `No download progress for ${DOWNLOAD_STALL_TIMEOUT_MS / 1000}s`));
+        }
+      }, DOWNLOAD_PROGRESS_INTERVAL_MS);
+
+      readable.on("data", (chunk: Buffer | string) => {
+        downloadedBytes += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+      });
+      readable.on("error", (error) => {
+        clearTimers(interval);
+        reject(error);
+      });
+      stream.on("error", (error) => {
+        clearTimers(interval);
+        reject(error);
+      });
+      stream.on("finish", () => {
+        clearTimers(interval);
+        closed = true;
+        onProgress?.(encodeLegacyProgress("downloading_zip", formatDownloadMessage(downloadedBytes, totalBytes)));
+        stream.close();
+        resolve();
+      });
+
+      readable.pipe(stream);
     });
   }
 

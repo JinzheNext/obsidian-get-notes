@@ -22,7 +22,7 @@ import {
 } from "./src/types";
 import { SettingsStore } from "./src/storage/SettingsStore";
 import { StateStore } from "./src/storage/StateStore";
-import { resolveModeTargetFolder } from "./src/utils/modePaths";
+import { generateMigrationReport } from "./src/migration/report";
 
 export default class GetNotesPlugin extends Plugin {
   settings: GetNotesPluginSettings = DEFAULT_SETTINGS;
@@ -195,7 +195,7 @@ export default class GetNotesPlugin extends Plugin {
           return;
         }
         const { shell } = require("electron") as { shell: { openPath(path: string): Promise<string> } };
-        await shell.openPath(`${basePath}/${resolveModeTargetFolder(this.settings.targetFolder, this.settings.syncMode)}`);
+        await shell.openPath(`${basePath}/${this.settings.targetFolder}`);
       }
     });
   }
@@ -249,16 +249,14 @@ export default class GetNotesPlugin extends Plugin {
   }
 
   private openApiSettings(): GetNotesPluginSettings {
-    return {
-      ...this.settings,
-      targetFolder: resolveModeTargetFolder(this.settings.targetFolder, "openapi")
-    };
+    return this.settings;
   }
 
   private async runSyncForMode(_trigger: "manual" | "startup" | "interval"): Promise<UnifiedSyncResult> {
     if (this.settings.syncMode === "legacy") {
-      const { legacyState, result } = await this.legacySyncService.sync(
+      const { legacyState, state, result } = await this.legacySyncService.sync(
         this.settings,
+        this.state,
         this.legacyState,
         (stage) => {
           this.currentLegacyStage = stage;
@@ -267,13 +265,12 @@ export default class GetNotesPlugin extends Plugin {
         },
       );
       this.legacyState = legacyState;
-      this.state = {
-        ...this.state,
-        lastSyncAt: result.finishedAt,
-        lastSyncSummary: result
-      };
+      this.state = state;
+      this.state.lastSyncAt = result.finishedAt;
+      this.state.lastSyncSummary = result;
       await this.legacyStateStore.save(this.legacyState);
       await this.stateStore.save(this.state);
+      await generateMigrationReport(this.app, this.manifest.id, this.settings.targetFolder, this.state).catch(() => undefined);
       this.refreshSettingsUI();
       return result;
     }
@@ -281,6 +278,7 @@ export default class GetNotesPlugin extends Plugin {
     this.ensureCredentials();
     this.state = await this.syncEngine.sync(this.openApiSettings());
     await this.stateStore.save(this.state);
+    await generateMigrationReport(this.app, this.manifest.id, this.settings.targetFolder, this.state).catch(() => undefined);
     this.refreshSettingsUI();
     return this.state.lastSyncSummary as UnifiedSyncResult;
   }

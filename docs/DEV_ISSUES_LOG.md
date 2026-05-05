@@ -258,6 +258,83 @@
 - 产品判断：
   普通登录模式不应伪装成与 API 等价，更适合被定位为：
   - 无 API Key 的兼容导入路径
+
+### 23. V5 Final 需要从“双渲染器”切到“单协议”
+
+- 现象：
+  API 和普通登录各自维护一套渲染结构时，后续每补一个字段、每修一个边界，都要改两条链路，结果很难长期保持一致。
+- 根因：
+  系统一开始是按“来源”组织的，而不是按“最终笔记协议”组织的。
+- 解法：
+  引入 `CanonicalNote` 作为唯一中间模型；
+  所有路径、附件、Markdown 渲染、fingerprint、deleted 逻辑都统一基于 `CanonicalNote`。
+
+### 24. `deleted` 状态必须高于同步优先级
+
+- 现象：
+  如果用户手动删掉一篇同步笔记，而远端数据还在，传统同步很容易把它又恢复出来。
+- 产品风险：
+  这会直接破坏用户对插件的信任，尤其是已经开始手工整理 Vault 的用户。
+- 解法：
+  在同步状态中引入 `deleted` 标记。
+  只要 state 存在但文件本地消失，就判定为“用户主动删除”，后续不再自动恢复。
+
+### 25. 真实样本表明 Legacy HTML 在会议类上天然缺正文
+
+- 离线对照结果：
+  基于本地 raw-cache 与官方 ZIP，对上了 `521` 组强匹配样本。
+- 关键发现：
+  `meeting` 类样本中，API 正文长度中位数比 Legacy 可见 HTML 多约 `5945` 字符；
+  `local_audio` 多约 `5752` 字符。
+- 结论：
+  “只来了一部分”的主因仍是 Legacy 可见层不完整，不是单纯渲染错误。
+
+### 26. 那 12 条“没来”的笔记，有一批其实是标题 HTML entity 漂移
+
+- 现象：
+  初看有 `12` 条 API 笔记在 ZIP 里找不到对应 Legacy 笔记。
+- 深挖后发现：
+  其中多条并不是真的缺失，而是 Legacy 标题里保留了 HTML entity，例如：
+  - `&#43;`
+  - `&#34;`
+  - `&lt;`
+- 解法：
+  增加跨来源标题匹配归一化：
+  - 先解 HTML entity
+  - 再归一化中英文引号、冒号和空白
+  让 API / Legacy 在标题匹配上更稳。
+
+### 27. `data-json` 当前更像黑盒 payload，而不是普通 JSON
+
+- 离线扫描结果：
+  当前 ZIP 中 `548` 篇 HTML 都带 `data-json`。
+- 但在完整 HTML entity 还原后：
+  - 直接 base64 decode 后不是 JSON
+  - 常见 zlib/raw-deflate 也解不开 JSON
+  - 当前扫描结果是 `0` 篇能直接还原为 JSON 结构
+- 结论：
+  这更像一层额外封装或加密后的 payload，不是简单压缩。
+- 当前策略：
+  - 保留显式 `data-json` 解码入口
+  - 未知格式直接 fallback 到 HTML
+  - 同时优先使用本地 API raw-cache 做补齐
+
+### 28. 普通登录模式的 ZIP 不会无限累积，但临时缓存仍要做保洁
+
+- 当前实现：
+  Legacy 导出的 ZIP 固定写到 `~/.get/cache/playwright/get_export.zip`，新同步会覆盖旧 ZIP，不会一版一份无限增长。
+- 真正的风险：
+  - 异常中断后残留的 `~/.get/cache/data-*` 解压临时目录
+  - 长时间遗留的调试截图 `page_screenshot.png`
+  - 极老的 ZIP 缓存文件
+- 解法：
+  在 Legacy 导出开始前增加轻量清理：
+  - 清理超过 1 天的 `data-*` 临时目录
+  - 清理超过 7 天的截图
+  - 清理超过 14 天且未再使用的 ZIP
+- 约束：
+  不清理 `get_auth.json`；
+  不自动清理 API `raw-cache`，避免影响从缓存重建和双源补齐。
   - 备份 / 全量导出路径
 
 ### 23. V5 测试现象：API 模式只导入了 1 条，普通登录模式 0 条
@@ -329,5 +406,53 @@
 - 在 UI 中显示最近一次导出时间
 - 根据最近一次导出时间动态提示用户是否适合再次导出
 - 普通模式增加同步阶段进度反馈
-- 音频文件名映射为与文档同名
 - 评估普通模式自动同步默认值是否应改为 3 小时或天级别
+
+### 23. OpenAPI 音频附件命名与文稿 stem 不一致
+
+- 现象：
+  OpenAPI 模式下，Markdown 文件名已经采用 `序号-标题-noteId`，但音频附件仍然使用 `noteId-序号` 命名，用户在 Vault 里按文件名浏览时不容易把附件和对应笔记直接对应起来。
+- 根因：
+  音频路径构建仍沿用了早期的 `noteId` 命名方式，没有跟最终的 Markdown stem 对齐。
+- 解法：
+  将 OpenAPI 模式下的音频附件命名改为与文稿 stem 对齐：
+  `序号-标题-noteId-音频序号.ext`
+  这样附件与 Markdown 在 Finder 和 Obsidian 中更容易一眼对应。
+
+### 24. OpenAPI “只来了一部分 / 没来”多数不是渲染器丢数据，而是上游字段能力差异
+
+- 排查范围：
+  基于当前插件 raw cache 对各 `note_type` 做了字段统计。
+- 结论：
+  - `audio / meeting / local_audio`：
+    `summary.content` 与 `detail.content` 基本一致，`detail.audio.original` 才是完整原始转写。
+    这说明 API 本身就是“总结 + 原文转写”双轨字段，不应把 `detail.content` 误当原文。
+  - `link / plain_text`：
+    很多笔记里 `summary.content` 与 `detail.content` 本质相同，说明这两类在当前 API 中经常只给出一份摘要式或正文式内容，而不是两份语义明确分开的字段。
+  - 少量 `plain_text`：
+    raw cache 中确实存在 `title / summary.content / detail.content` 全空样本。
+    这类“没来”的问题来自上游返回为空，不是 MarkdownRenderer 吃掉了内容。
+- 对 V5 的产品含义：
+  对用户必须明确区分：
+  - “当前 API 提供了摘要和原始转写”
+  - “当前 API 只提供了一份内容”
+  - “当前 API 没提供可渲染正文”
+  不能继续假设所有 note type 的字段语义完全一致。
+
+### 25. Legacy 导出 ZIP 中存在隐藏 `data-json`，当前解析器尚未利用
+
+- 现象：
+  每篇 Legacy 导出 HTML 顶部都带有隐藏节点：
+  `#jsonData[data-json=\"...\"]`
+- 当前状态：
+  现有 `LegacyGetCore` 只解析页面里已经渲染出来的 HTML，可稳定拿到标题、标签、音频标签和正文可见文本。
+- 新发现：
+  页面可见层对音频/会议类更多呈现的是“总结型文本”，看不到与 OpenAPI `audio.original` 对应的完整逐字转写；
+  但 ZIP 中又额外携带了隐藏 `data-json` blob，说明普通登录模式很可能还有一层更原始的数据未被利用。
+- 当前判断：
+  Legacy “只来了一部分”至少有两层根因：
+  1. 页面层本身只渲染了总结型内容
+  2. 插件尚未解码隐藏 `data-json`
+- 下一步：
+  继续逆向 `data-json` 的编码/压缩/加密方式；
+  如果能解出结构化 payload，Legacy 模式的内容完整度还有明显提升空间。

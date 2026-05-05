@@ -24,12 +24,12 @@ export class SyncPlanner {
     for (const summary of summaries) {
       const id = noteId(summary);
       if (!id) continue;
-      const existing = state.notesById[id];
+      const existing = state.notesByCanonicalId[`api:${id}`];
       if (!existing) {
         added.push(summary);
         continue;
       }
-      if (existing.updatedAt !== updatedAt(summary)) {
+      if (String(existing.updatedAt || "") !== updatedAt(summary)) {
         updated.push(summary);
         continue;
       }

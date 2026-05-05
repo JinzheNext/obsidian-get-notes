@@ -1,5 +1,7 @@
 export type SyncMode = "openapi" | "legacy";
 export type SyncStatus = "success" | "partial_success" | "failed";
+export type CanonicalNoteType = "audio" | "meeting" | "text" | "link" | "other";
+export type CompletenessSource = "api" | "legacy" | "html" | "none";
 export type LegacySyncStage =
   | "idle"
   | "starting"
@@ -32,22 +34,79 @@ export interface GetNotesPluginSettings {
   legacyDownloadDir?: string;
 }
 
-export interface NoteSyncState {
-  noteId: string;
-  updatedAt: string;
-  createdAt?: string;
+export interface Asset {
+  kind: "audio" | "image" | "file";
+  source: string;
   title: string;
-  type: string;
-  category: string;
+  ext?: string;
+}
+
+export interface CanonicalNote {
+  canonicalId: string;
+  sourceIds: {
+    api?: string;
+    legacy?: string;
+  };
+  title: string;
+  type: CanonicalNoteType;
+  createdAt: number | null;
+  updatedAt: number | null;
+  content: {
+    summary: string | null;
+    body: string | null;
+    reference: string | null;
+  };
+  tags: string[];
+  notebook: string | null;
+  assets: {
+    audios: Asset[];
+    images: Asset[];
+    files: Asset[];
+    links: string[];
+  };
+  completeness: {
+    summary: CompletenessSource;
+    body: CompletenessSource;
+    assets: CompletenessSource;
+  };
+  fingerprint: string;
+}
+
+export interface SyncStateEntry {
+  canonicalId: string;
+  filePath: string;
+  fingerprint: string;
+  deleted: boolean;
+  lastSyncedAt: number;
   localSequence: number;
   stem: string;
-  markdownPath: string;
-  duplicateMarkdownPaths?: string[];
-  audioPaths: string[];
-  rawCacheKey: string;
-  lastSyncedAt: string;
-  lastContentHash?: string;
-  lastError?: string;
+  sourceIds: {
+    api?: string;
+    legacy?: string;
+  };
+  type: CanonicalNoteType;
+  updatedAt: number | null;
+  title: string;
+  assetPaths: {
+    audios: string[];
+    images: string[];
+    files: string[];
+  };
+}
+
+export interface MigrationReport {
+  matches: {
+    canonicalId: string;
+    apiPath?: string;
+    legacyPath?: string;
+    winner: "api" | "legacy";
+    completenessDiff: string[];
+  }[];
+  conflicts: {
+    reason: string;
+    candidates: string[];
+  }[];
+  unmatched: string[];
 }
 
 export interface UnifiedSyncResult {
@@ -73,7 +132,7 @@ export interface PluginSyncState {
   schemaVersion: number;
   lastSyncAt?: string;
   nextLocalSequence: number;
-  notesById: Record<string, NoteSyncState>;
+  notesByCanonicalId: Record<string, SyncStateEntry>;
   lastSyncSummary?: UnifiedSyncResult;
 }
 
@@ -105,9 +164,9 @@ export const DEFAULT_SETTINGS: GetNotesPluginSettings = {
 };
 
 export const DEFAULT_SYNC_STATE: PluginSyncState = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   nextLocalSequence: 1,
-  notesById: {}
+  notesByCanonicalId: {}
 };
 
 export const DEFAULT_LEGACY_SYNC_STATE: LegacySyncState = {

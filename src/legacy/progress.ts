@@ -29,3 +29,25 @@ export interface LegacyStageEvent {
 export function legacyStageMessage(stage: LegacySyncStage): string {
   return LEGACY_STAGE_MESSAGES[stage];
 }
+
+export const LEGACY_STAGE_KEYS = new Set<LegacySyncStage>(Object.keys(LEGACY_STAGE_MESSAGES) as LegacySyncStage[]);
+
+export function encodeLegacyProgress(stage: LegacySyncStage, message?: string): string {
+  if (!message) return stage;
+  return `${stage}::${message}`;
+}
+
+export function decodeLegacyProgress(signal: string): { stage: LegacySyncStage | null; message: string } {
+  const [prefix, ...rest] = signal.split("::");
+  if (LEGACY_STAGE_KEYS.has(prefix as LegacySyncStage)) {
+    return {
+      stage: prefix as LegacySyncStage,
+      message: rest.length ? rest.join("::") : legacyStageMessage(prefix as LegacySyncStage)
+    };
+  }
+
+  return {
+    stage: null,
+    message: signal
+  };
+}

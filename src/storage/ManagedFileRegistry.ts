@@ -10,13 +10,16 @@ export class ManagedFileRegistry {
     const normalizedRoot = normalizePath(targetFolder);
     const managedPaths = new Set<string>();
 
-    for (const noteState of Object.values(state?.notesById || {})) {
-      if (noteState.markdownPath) managedPaths.add(normalizePath(noteState.markdownPath));
-      for (const duplicatePath of noteState.duplicateMarkdownPaths || []) {
-        managedPaths.add(normalizePath(duplicatePath));
+    for (const noteState of Object.values(state?.notesByCanonicalId || {})) {
+      if (noteState.filePath) managedPaths.add(normalizePath(noteState.filePath));
+      for (const assetPath of noteState.assetPaths.audios || []) {
+        managedPaths.add(normalizePath(assetPath));
       }
-      for (const audioPath of noteState.audioPaths || []) {
-        managedPaths.add(normalizePath(audioPath));
+      for (const assetPath of noteState.assetPaths.images || []) {
+        managedPaths.add(normalizePath(assetPath));
+      }
+      for (const assetPath of noteState.assetPaths.files || []) {
+        managedPaths.add(normalizePath(assetPath));
       }
     }
 
@@ -31,5 +34,7 @@ export class ManagedFileRegistry {
       await removePathIfExists(this.app, normalizePath(`${normalizedRoot}/${category}`));
     }
     await removePathIfExists(this.app, normalizePath(`${normalizedRoot}/_assets/audio`));
+    await removePathIfExists(this.app, normalizePath(`${normalizedRoot}/_assets/images`));
+    await removePathIfExists(this.app, normalizePath(`${normalizedRoot}/_assets/files`));
   }
 }

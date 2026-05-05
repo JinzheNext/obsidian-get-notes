@@ -6,6 +6,7 @@ export type LegacyExportErrorType =
   | "EXPORT_BUTTON_NOT_FOUND"
   | "EXPORT_TASK_TIMEOUT"
   | "DOWNLOAD_TIMEOUT"
+  | "DOWNLOAD_STALLED"
   | "ZIP_NOT_FOUND"
   | "ZIP_INVALID"
   | "PARSE_FAILED"
@@ -39,6 +40,8 @@ export function toLegacyUserMessage(error: unknown): string {
         return "普通登录模式失败：等待导出任务完成超时，请稍后重试或先在 Get 网页里手动检查。";
       case "DOWNLOAD_TIMEOUT":
         return "普通登录模式失败：下载超时，请稍后重试。";
+      case "DOWNLOAD_STALLED":
+        return "普通登录模式失败：下载长时间没有进展，请检查网络、磁盘空间或稍后重试。";
       case "ZIP_NOT_FOUND":
         return "普通登录模式失败：未找到导出的 ZIP 文件。";
       case "ZIP_INVALID":

@@ -5,6 +5,7 @@ export const LEGACY_CACHE_LOC = path.join(os.homedir(), ".get/cache/");
 export const LEGACY_PLAYWRIGHT_CACHE_LOC = path.join(os.homedir(), ".get/cache/playwright/");
 export const LEGACY_AUTH_FILE = path.join(LEGACY_PLAYWRIGHT_CACHE_LOC, "get_auth.json");
 export const LEGACY_DOWNLOAD_FILE = path.join(LEGACY_PLAYWRIGHT_CACHE_LOC, "get_export.zip");
+export const LEGACY_SCREENSHOT_FILE = path.join(LEGACY_PLAYWRIGHT_CACHE_LOC, "page_screenshot.png");
 
 export const GET_LOGIN_URL = "https://www.biji.com/";
 export const GET_EXPORT_CANDIDATE_URLS = [
