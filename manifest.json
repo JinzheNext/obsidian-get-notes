@@ -3,7 +3,7 @@
   "name": "Get Notes",
   "version": "0.1.0",
   "minAppVersion": "1.6.0",
-  "description": "Sync Get official OpenAPI notes into your Obsidian vault.",
+  "description": "Sync Get notes into your Obsidian vault via OpenAPI or legacy web export.",
   "author": "Jerry Shan",
   "authorUrl": "https://github.com/Jerry-Shan",
   "isDesktopOnly": true

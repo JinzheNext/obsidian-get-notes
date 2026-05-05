@@ -1,4 +1,5 @@
 import { GetNoteDetail, GetNoteSummary, RawNoteRecord } from "../api/types";
+import { isSubstantiallySameText } from "./TextCompare";
 import { renderFrontmatter } from "./FrontmatterRenderer";
 
 function normalizeText(value: unknown): string {
@@ -25,6 +26,13 @@ function bodyMarkdown(detail: GetNoteDetail | null): string {
   if (transcript) return transcript;
   if (!hasSmartSummary(detail) && content) return content;
   return "";
+}
+
+function unavailableContentMessage(noteType: string | undefined): string {
+  if (noteType === "audio" || noteType === "local_audio" || noteType === "meeting") {
+    return "_当前 API 数据中暂未提供完整原文转写内容。_";
+  }
+  return "_当前 API 数据中暂未提供可单独渲染的原文内容。_";
 }
 
 function originalReference(detail: GetNoteDetail | null): string {
@@ -95,6 +103,10 @@ function buildAttachmentsSection(detail: GetNoteDetail | null, audioLinks: strin
 export function renderMarkdown(record: RawNoteRecord, stem: string, audioLinks: string[]): string {
   const detail = record.detail;
   const title = detail?.title || record.summary.title || stem;
+  const noteType = detail?.note_type || record.summary.note_type || "";
+  const summary = summaryMarkdown(record);
+  const body = bodyMarkdown(detail);
+  const sameSummaryAndBody = isSubstantiallySameText(summary, body);
   const sections = [
     renderFrontmatter(detail, record.summary, stem),
     `# ${title}`,
@@ -105,11 +117,23 @@ export function renderMarkdown(record: RawNoteRecord, stem: string, audioLinks: 
     ""
   ];
 
-  const summary = summaryMarkdown(record);
-  if (summary) sections.push("## 智能总结", "", summary, "");
-
-  const body = bodyMarkdown(detail);
-  if (body) sections.push("## 笔记内容", "", body, "");
+  if (noteType === "plain_text" || noteType === "link") {
+    if (body) {
+      sections.push("## 笔记内容", "", body, "");
+    }
+    if (summary && !sameSummaryAndBody) {
+      sections.push("## 智能总结", "", summary, "");
+    }
+  } else {
+    if (summary) {
+      sections.push("## 智能总结", "", summary, "");
+    }
+    if (body && !sameSummaryAndBody) {
+      sections.push("## 笔记内容", "", body, "");
+    } else if (!body && summary) {
+      sections.push("## 笔记内容", "", unavailableContentMessage(noteType), "");
+    }
+  }
 
   const originalRef = originalReference(detail);
   if (originalRef) sections.push("## 原始引用", "", originalRef, "");

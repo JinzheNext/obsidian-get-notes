@@ -1,8 +1,7 @@
-import { requestUrl, RequestUrlResponse } from "obsidian";
 import { GetApiError } from "./errors";
 import { GetListResponse } from "./types";
+import { debugLog } from "../utils/logger";
 
-const BASE_URL = "https://www.biji.com";
 const OPENAPI_BASE_URL = "https://openapi.biji.com";
 const MIN_REQUEST_INTERVAL_MS = 650;
 
@@ -23,9 +22,6 @@ export class GetApiClient {
   private get headers(): Record<string, string> {
     return {
       accept: "application/json, text/plain, */*",
-      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-      origin: BASE_URL,
-      referer: `${BASE_URL}/note`,
       Authorization: this.apiKey,
       "X-Client-ID": this.clientId,
       "user-agent": "Obsidian Get Notes Plugin"
@@ -39,18 +35,27 @@ export class GetApiClient {
     this.lastRequestAt = Date.now();
   }
 
+  private async requestText(url: string, headers: Record<string, string>): Promise<{ status: number; text: string }> {
+    debugLog("api request", url);
+    const response = await fetch(url, {
+      method: "GET",
+      headers
+    });
+    debugLog("api response", url, response.status);
+
+    return {
+      status: response.status,
+      text: await response.text()
+    };
+  }
+
   private async requestJson<T = unknown>(url: string): Promise<T> {
     let attempt = 0;
     for (;;) {
       await this.waitForTurn();
-      const response = await requestUrl({
-        url,
-        method: "GET",
-        headers: this.headers,
-        throw: false
-      });
+      const response = await this.requestText(url, this.headers);
       if (response.status >= 200 && response.status < 300) {
-        return this.parseJson<T>(response);
+        return this.parseJson<T>(response.text, response.status);
       }
 
       const body = response.text || "";
@@ -65,29 +70,28 @@ export class GetApiClient {
     }
   }
 
-  private parseJson<T>(response: RequestUrlResponse): T {
+  private parseJson<T>(text: string, status: number): T {
     try {
-      return JSON.parse(response.text) as T;
+      return JSON.parse(text) as T;
     } catch (error) {
-      throw new GetApiError(`Invalid JSON response: ${(error as Error).message}`, response.status);
+      throw new GetApiError(`Invalid JSON response: ${(error as Error).message}`, status);
     }
   }
 
   async downloadBinary(url: string): Promise<ArrayBuffer> {
     await this.waitForTurn();
-    const response = await requestUrl({
-      url,
+    debugLog("audio download request", url);
+    const response = await fetch(url, {
       method: "GET",
       headers: {
-        referer: `${BASE_URL}/note`,
         "user-agent": "Obsidian Get Notes Plugin"
-      },
-      throw: false
+      }
     });
-    if (response.status < 200 || response.status >= 300) {
+    debugLog("audio download response", url, response.status);
+    if (!response.ok) {
       throw new GetApiError(`Audio download failed ${response.status} for ${url}`, response.status);
     }
-    return response.arrayBuffer;
+    return response.arrayBuffer();
   }
 
   async getUserInfo(): Promise<unknown> {
@@ -110,6 +114,6 @@ export class GetApiClient {
   }
 
   async testConnection(): Promise<void> {
-    await this.getUserInfo();
+    await this.listNotes("0");
   }
 }

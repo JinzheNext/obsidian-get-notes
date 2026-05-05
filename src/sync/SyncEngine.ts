@@ -18,6 +18,14 @@ import { nowIso } from "../utils/time";
 import { SyncPlanner } from "./SyncPlanner";
 import { SyncCounters, toLastSyncSummary } from "./SyncResult";
 
+interface DiscoveredManagedNote {
+  noteId: string;
+  path: string;
+  stem: string;
+  localSequence: number;
+  category: string;
+}
+
 function normalizeAudioUrls(detail: GetNoteDetail | null): string[] {
   const urls = new Set<string>();
   const direct = detail?.audio?.play_url;
@@ -48,7 +56,7 @@ function extForAudio(url: string): string {
   return match ? match[1].toLowerCase() : "bin";
 }
 
-function updatedAt(summary: GetNoteSummary): string {
+function summaryUpdatedAt(summary: GetNoteSummary): string {
   return String(summary.updated_at || "");
 }
 
@@ -70,22 +78,32 @@ export class SyncEngine {
   }
 
   async testConnection(settings: GetNotesPluginSettings): Promise<void> {
+    debugLog("test connection start");
     const client = new GetApiClient(settings.apiKey, settings.clientId);
     await client.testConnection();
+    debugLog("test connection success");
   }
 
   async sync(settings: GetNotesPluginSettings): Promise<PluginSyncState> {
     const startedAt = nowIso();
     const counters: SyncCounters = { added: 0, updated: 0, skipped: 0, failed: 0, totalRemote: 0 };
     const state = await this.stateStore.load();
+    await this.reconcileStateWithVault(state, settings);
+    debugLog("sync start", settings.targetFolder);
 
     try {
       const client = new GetApiClient(settings.apiKey, settings.clientId);
       const summaries = await this.fetchAllSummaries(client);
       counters.totalRemote = summaries.length;
+      debugLog("sync fetched summaries", summaries.length);
 
       const plan = this.planner.plan(summaries, state);
       counters.skipped = plan.skipped.length;
+      debugLog("sync plan", {
+        added: plan.added.length,
+        updated: plan.updated.length,
+        skipped: plan.skipped.length
+      });
 
       await ensureVaultFolder(this.app, settings.targetFolder);
       if (settings.downloadAudio) {
@@ -111,28 +129,45 @@ export class SyncEngine {
       }
 
       state.lastSyncAt = nowIso();
-      state.lastSyncSummary = toLastSyncSummary(counters, startedAt, nowIso());
+      state.lastSyncSummary = toLastSyncSummary(counters, startedAt, nowIso(), undefined, settings.targetFolder);
       await this.stateStore.save(state);
+      debugLog("sync complete", state.lastSyncSummary);
       return state;
     } catch (error) {
-      state.lastSyncSummary = toLastSyncSummary(counters, startedAt, nowIso(), (error as Error).message);
+      state.lastSyncSummary = toLastSyncSummary(
+        counters,
+        startedAt,
+        nowIso(),
+        (error as Error).message,
+        settings.targetFolder
+      );
       await this.stateStore.save(state);
+      debugLog("sync failed", error);
       throw error;
     }
   }
 
   async rebuildFromCache(settings: GetNotesPluginSettings): Promise<PluginSyncState> {
     const state = await this.stateStore.load();
-    await this.registry.clearManagedContent(settings.targetFolder);
+    await this.reconcileStateWithVault(state, settings);
+    debugLog("rebuild start", {
+      targetFolder: settings.targetFolder,
+      trackedNotes: Object.keys(state.notesById).length
+    });
+    await this.registry.clearManagedContent(settings.targetFolder, state);
     await ensureVaultFolder(this.app, settings.targetFolder);
     if (settings.downloadAudio) {
       await ensureVaultFolder(this.app, normalizePath(`${settings.targetFolder}/_assets/audio`));
     }
 
+    let rebuilt = 0;
+    let failed = 0;
     for (const noteState of Object.values(state.notesById).sort((a, b) => a.localSequence - b.localSequence)) {
       const raw = await this.rawCache.read(noteState.noteId);
       if (!raw) {
         noteState.lastError = "Raw cache missing";
+        failed += 1;
+        debugLog("rebuild missing raw cache", noteState.noteId);
         continue;
       }
 
@@ -141,25 +176,31 @@ export class SyncEngine {
       const audioLinks = await this.existingAudioLinks(noteState.audioPaths, markdownPath);
       const markdown = renderMarkdown(raw, noteState.stem, audioLinks);
       await upsertVaultFile(this.app, markdownPath, markdown);
+      debugLog("rebuild wrote markdown", markdownPath);
 
       noteState.category = category;
       noteState.markdownPath = markdownPath;
       noteState.lastContentHash = hashText(markdown);
       noteState.lastError = undefined;
+      rebuilt += 1;
     }
 
     state.lastSyncAt = nowIso();
     state.lastSyncSummary = {
+      mode: "openapi",
       startedAt: state.lastSyncAt,
       finishedAt: state.lastSyncAt,
-      status: "success",
+      status: failed > 0 ? (rebuilt > 0 ? "partial_success" : "failed") : "success",
       added: 0,
-      updated: 0,
-      skipped: Object.keys(state.notesById).length,
-      failed: 0,
-      totalRemote: Object.keys(state.notesById).length
+      updated: rebuilt,
+      skipped: Math.max(0, Object.keys(state.notesById).length - rebuilt - failed),
+      failed,
+      total: Object.keys(state.notesById).length,
+      totalRemote: Object.keys(state.notesById).length,
+      outputFolder: settings.targetFolder
     };
     await this.stateStore.save(state);
+    debugLog("rebuild complete", state.lastSyncSummary);
     return state;
   }
 
@@ -171,6 +212,7 @@ export class SyncEngine {
     for (;;) {
       const page = await client.listNotes(sinceId);
       const items = pickItems(page) as GetNoteSummary[];
+      debugLog("sync page", { sinceId, itemCount: items.length });
       if (!items.length) break;
 
       let added = 0;
@@ -202,9 +244,11 @@ export class SyncEngine {
     const localSequence = existing?.localSequence ?? state.nextLocalSequence;
     const stem = existing?.stem ?? buildStem(localSequence, noteTitle(summary), noteId);
     if (!existing) state.nextLocalSequence += 1;
+    debugLog("sync note start", { noteId, stem, existing: Boolean(existing) });
 
     const detailPayload = await client.getNoteDetail(noteId);
     const detail = detailFromPayload(detailPayload);
+    debugLog("sync note detail fetched", noteId);
     const rawRecord: RawNoteRecord = {
       summary,
       detailPayload,
@@ -226,6 +270,7 @@ export class SyncEngine {
         const audioPath = buildAudioPath(settings.targetFolder, noteId, index, extForAudio(url));
         await downloader.download(url, audioPath);
         audioPaths.push(audioPath);
+        debugLog("sync note audio saved", audioPath);
       }
     }
 
@@ -233,11 +278,13 @@ export class SyncEngine {
     const markdown = renderMarkdown(rawRecord, stem, audioLinks);
 
     await upsertVaultFile(this.app, markdownPath, markdown);
+    debugLog("sync note markdown saved", markdownPath);
     const rawCacheKey = await this.rawCache.write(noteId, rawRecord);
+    debugLog("sync note raw cache saved", rawCacheKey);
 
     state.notesById[noteId] = {
       noteId,
-      updatedAt: updatedAt(summary),
+      updatedAt: summaryUpdatedAt(summary),
       createdAt: detail?.created_at || summary.created_at,
       title: detail?.title || summary.title || stem,
       type: detail?.note_type || summary.note_type || "unknown",
@@ -245,12 +292,26 @@ export class SyncEngine {
       localSequence,
       stem,
       markdownPath,
+      duplicateMarkdownPaths: [],
       audioPaths,
       rawCacheKey,
       lastSyncedAt: nowIso(),
       lastContentHash: hashText(markdown),
       lastError: undefined
     };
+
+    const obsoleteMarkdownPaths = new Set<string>();
+    if (existing?.markdownPath && normalizePath(existing.markdownPath) !== markdownPath) {
+      obsoleteMarkdownPaths.add(normalizePath(existing.markdownPath));
+    }
+    for (const duplicatePath of existing?.duplicateMarkdownPaths || []) {
+      const normalized = normalizePath(duplicatePath);
+      if (normalized !== markdownPath) obsoleteMarkdownPaths.add(normalized);
+    }
+    for (const obsoletePath of obsoleteMarkdownPaths) {
+      await removePathIfExists(this.app, obsoletePath);
+      debugLog("sync note removed obsolete markdown", obsoletePath);
+    }
   }
 
   private async existingAudioLinks(audioPaths: string[], markdownPath: string): Promise<string[]> {
@@ -261,5 +322,124 @@ export class SyncEngine {
       }
     }
     return links;
+  }
+
+  private async reconcileStateWithVault(state: PluginSyncState, settings: GetNotesPluginSettings): Promise<void> {
+    const discovered = await this.discoverManagedNotes(settings.targetFolder);
+    if (!discovered.length) return;
+
+    const byNoteId = new Map<string, DiscoveredManagedNote[]>();
+    for (const candidate of discovered) {
+      const existing = byNoteId.get(candidate.noteId) || [];
+      existing.push(candidate);
+      byNoteId.set(candidate.noteId, existing);
+    }
+
+    let changed = false;
+    for (const [noteId, candidates] of byNoteId.entries()) {
+      const sorted = [...candidates].sort((left, right) => {
+        if (left.localSequence !== right.localSequence) return left.localSequence - right.localSequence;
+        return left.path.localeCompare(right.path);
+      });
+
+      const existing = state.notesById[noteId];
+      const preferredPath = existing?.markdownPath ? normalizePath(existing.markdownPath) : null;
+      const canonical =
+        sorted.find((candidate) => normalizePath(candidate.path) === preferredPath) || sorted[0];
+      const duplicateMarkdownPaths = sorted
+        .filter((candidate) => normalizePath(candidate.path) !== normalizePath(canonical.path))
+        .map((candidate) => normalizePath(candidate.path));
+
+      const raw = await this.rawCache.read(noteId).catch(() => null);
+      const rawSummary = raw?.summary;
+      const rawDetail = raw?.detail;
+      const rawType = rawDetail?.note_type || rawSummary?.note_type;
+      const nextState = {
+        ...existing,
+        noteId,
+        updatedAt: existing?.updatedAt || (rawSummary ? summaryUpdatedAt(rawSummary) : ""),
+        createdAt: existing?.createdAt || rawDetail?.created_at || rawSummary?.created_at,
+        title: existing?.title || rawDetail?.title || rawSummary?.title || canonical.stem,
+        type: existing?.type || rawType || "unknown",
+        category: rawType ? resolveCategory(rawType) : canonical.category,
+        localSequence: existing?.localSequence || canonical.localSequence,
+        stem: existing?.stem || canonical.stem,
+        markdownPath: canonical.path,
+        duplicateMarkdownPaths,
+        audioPaths: existing?.audioPaths || [],
+        rawCacheKey: existing?.rawCacheKey || `${noteId}.json`,
+        lastSyncedAt: existing?.lastSyncedAt || state.lastSyncAt || nowIso(),
+        lastContentHash: existing?.lastContentHash,
+        lastError: existing?.lastError
+      };
+
+      if (JSON.stringify(existing) !== JSON.stringify(nextState)) {
+        state.notesById[noteId] = nextState;
+        changed = true;
+      }
+
+      if (duplicateMarkdownPaths.length > 0) {
+        debugLog("reconcile detected duplicate markdowns", { noteId, duplicateMarkdownPaths });
+      }
+    }
+
+    const maxSequence = Object.values(state.notesById).reduce((max, noteState) => {
+      return Number.isFinite(noteState.localSequence) ? Math.max(max, noteState.localSequence) : max;
+    }, 0);
+    const nextLocalSequence = maxSequence + 1;
+    if (state.nextLocalSequence !== nextLocalSequence) {
+      state.nextLocalSequence = nextLocalSequence;
+      changed = true;
+    }
+
+    if (changed) {
+      await this.stateStore.save(state);
+      debugLog("reconcile state with vault complete", {
+        trackedNotes: Object.keys(state.notesById).length,
+        nextLocalSequence: state.nextLocalSequence
+      });
+    }
+  }
+
+  private async discoverManagedNotes(targetFolder: string): Promise<DiscoveredManagedNote[]> {
+    const markdownPaths = await this.listMarkdownFiles(targetFolder);
+    const discovered: DiscoveredManagedNote[] = [];
+    for (const path of markdownPaths) {
+      const normalized = normalizePath(path);
+      const fileName = normalized.split("/").pop() || "";
+      const match = fileName.match(/^(\d+)-(.+)-(\d{8,})\.md$/);
+      if (!match) continue;
+
+      discovered.push({
+        noteId: match[3],
+        path: normalized,
+        stem: fileName.replace(/\.md$/, ""),
+        localSequence: Number.parseInt(match[1], 10) || 0,
+        category: normalized.split("/").slice(-2, -1)[0] || "99 其他"
+      });
+    }
+    return discovered;
+  }
+
+  private async listMarkdownFiles(root: string): Promise<string[]> {
+    const normalizedRoot = normalizePath(root);
+    const exists = await this.app.vault.adapter.exists(normalizedRoot);
+    if (!exists) return [];
+
+    const results: string[] = [];
+    const walk = async (currentPath: string): Promise<void> => {
+      const listing = await this.app.vault.adapter.list(currentPath).catch(() => null);
+      if (!listing) return;
+
+      for (const filePath of listing.files) {
+        if (filePath.endsWith(".md")) results.push(normalizePath(filePath));
+      }
+      for (const folderPath of listing.folders) {
+        await walk(folderPath);
+      }
+    };
+
+    await walk(normalizedRoot);
+    return results;
   }
 }

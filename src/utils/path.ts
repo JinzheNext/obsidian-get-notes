@@ -63,10 +63,10 @@ export async function removePathIfExists(app: App, targetPath: string): Promise<
   });
 }
 
-export function toVaultRelativeAudioLink(markdownPath: string, audioPath: string): string {
+export function toVaultRelativePath(markdownPath: string, targetPath: string): string {
   const markdownParts = normalizePath(markdownPath).split("/");
   markdownParts.pop();
-  const audioParts = normalizePath(audioPath).split("/");
+  const audioParts = normalizePath(targetPath).split("/");
 
   let shared = 0;
   while (shared < markdownParts.length && shared < audioParts.length && markdownParts[shared] === audioParts[shared]) {
@@ -76,4 +76,8 @@ export function toVaultRelativeAudioLink(markdownPath: string, audioPath: string
   const up = markdownParts.slice(shared).map(() => "..");
   const down = audioParts.slice(shared);
   return normalizePath([...up, ...down].join("/"));
+}
+
+export function toVaultRelativeAudioLink(markdownPath: string, audioPath: string): string {
+  return toVaultRelativePath(markdownPath, audioPath);
 }
