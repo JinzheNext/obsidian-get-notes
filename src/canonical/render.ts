@@ -2,6 +2,38 @@ import { CanonicalNote } from "../types";
 import { isSubstantiallySameText } from "../render/TextCompare";
 import { normalizeText } from "./common";
 
+function yamlScalar(value: unknown): string {
+  return JSON.stringify(value ?? "");
+}
+
+function renderFrontmatter(note: CanonicalNote, sourceLabel: "api" | "legacy"): string[] {
+  const lines = [
+    "---",
+    `title: ${yamlScalar(note.title)}`,
+    `canonicalId: ${yamlScalar(note.canonicalId)}`,
+    `source: ${yamlScalar(sourceLabel)}`,
+    `type: ${yamlScalar(note.type)}`,
+    `created_at: ${yamlScalar(formatUpdated(note.createdAt))}`,
+    `updated_at: ${yamlScalar(formatUpdated(note.updatedAt))}`,
+    `notebook: ${yamlScalar(note.notebook || "")}`,
+    "tags:"
+  ];
+
+  if (note.tags.length) {
+    for (const tag of note.tags) {
+      lines.push(`  - ${yamlScalar(tag)}`);
+    }
+  } else {
+    lines.push("  []");
+  }
+
+  lines.push("source_ids:");
+  lines.push(`  api: ${yamlScalar(note.sourceIds.api || "")}`);
+  lines.push(`  legacy: ${yamlScalar(note.sourceIds.legacy || "")}`);
+  lines.push("---");
+  return lines;
+}
+
 function formatUpdated(value: number | null): string {
   if (!value) return "unknown";
   const date = new Date(value);
@@ -22,6 +54,8 @@ export function renderCanonicalMarkdown(
   const sameSummaryAndBody = summary && body ? isSubstantiallySameText(summary, body) : false;
   const renderedBody = sameSummaryAndBody ? "" : body;
   const lines = [
+    ...renderFrontmatter(note, sourceLabel),
+    "",
     `# ${note.title}`,
     "",
     "## 🧠 摘要",
@@ -36,12 +70,7 @@ export function renderCanonicalMarkdown(
     "## 📎 附件",
     `- 音频：${assetLinks.audios.length ? assetLinks.audios.map((link) => `![[${link}]]`).join(" ") : "无"}`,
     `- 图片：${assetLinks.images.length ? assetLinks.images.map((link) => `![[${link}]]`).join(" ") : "无"}`,
-    `- 文件：${assetLinks.files.length ? assetLinks.files.map((link) => `![[${link}]]`).join(" ") : "无"}`,
-    "---",
-    `source: ${sourceLabel}`,
-    `updated: ${formatUpdated(note.updatedAt)}`,
-    `canonicalId: ${note.canonicalId}`
+    `- 文件：${assetLinks.files.length ? assetLinks.files.map((link) => `![[${link}]]`).join(" ") : "无"}`
   ];
   return `${lines.join("\n").trim()}\n`;
 }
-

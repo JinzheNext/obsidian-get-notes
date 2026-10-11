@@ -14,6 +14,10 @@ export interface PreparedCanonicalWrite {
   skipReason?: "deleted" | "missing-file" | "unchanged";
 }
 
+export interface CanonicalWritePolicy {
+  restoreMissingFiles?: boolean;
+}
+
 function buildStableIdSuffix(note: CanonicalNote): string {
   return note.sourceIds.api || note.sourceIds.legacy || note.fingerprint.slice(0, 12);
 }
@@ -51,7 +55,8 @@ export async function prepareCanonicalWrite(
   app: App,
   state: PluginSyncState,
   note: CanonicalNote,
-  targetFolder: string
+  targetFolder: string,
+  policy: CanonicalWritePolicy = {}
 ): Promise<PreparedCanonicalWrite> {
   const matched = matchExistingState(note, state);
   const canonicalId = finalCanonicalId(note, matched);
@@ -71,6 +76,16 @@ export async function prepareCanonicalWrite(
   }
 
   if (existingEntry?.filePath && !(await app.vault.adapter.exists(normalizePath(existingEntry.filePath)))) {
+    if (policy.restoreMissingFiles) {
+      return {
+        canonicalId,
+        existingKey,
+        existingEntry,
+        localSequence: existingEntry.localSequence,
+        stem: existingEntry.stem,
+        filePath: existingEntry.filePath
+      };
+    }
     existingEntry.deleted = true;
     return {
       canonicalId,

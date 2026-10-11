@@ -55,6 +55,7 @@ export class SyncEngine {
     const startedAt = nowIso();
     const counters: SyncCounters = { added: 0, updated: 0, skipped: 0, failed: 0, totalRemote: 0 };
     const state = await this.stateStore.load();
+    const restoreMissingFiles = await this.shouldRestoreMissingFiles(state, settings.targetFolder);
 
     try {
       await this.ensureOutputFolders(settings.targetFolder);
@@ -68,7 +69,9 @@ export class SyncEngine {
           const detailPayload = await client.getNoteDetail(noteIdentity(summary));
           const detail = detailFromPayload(detailPayload);
           const note = canonicalizeApiNote(summary, detail);
-          const prepared = await prepareCanonicalWrite(this.app, state, note, settings.targetFolder);
+          const prepared = await prepareCanonicalWrite(this.app, state, note, settings.targetFolder, {
+            restoreMissingFiles
+          });
           if (prepared.skipReason) {
             counters.skipped += 1;
             continue;
@@ -113,6 +116,27 @@ export class SyncEngine {
       await this.stateStore.save(state);
       throw error;
     }
+  }
+
+  private async shouldRestoreMissingFiles(state: PluginSyncState, targetFolder: string): Promise<boolean> {
+    const trackedEntries = Object.values(state.notesByCanonicalId);
+    if (trackedEntries.length < 20) return false;
+
+    let existingTrackedFiles = 0;
+    for (const entry of trackedEntries) {
+      if (!entry.filePath) continue;
+      if (await this.app.vault.adapter.exists(normalizePath(entry.filePath))) {
+        existingTrackedFiles += 1;
+      }
+    }
+
+    const folderMismatch =
+      !!state.lastSyncSummary?.outputFolder &&
+      normalizePath(state.lastSyncSummary.outputFolder) !== normalizePath(targetFolder);
+    const previousModeWasLegacy = state.lastSyncSummary?.mode === "legacy";
+    const almostEverythingMissing = existingTrackedFiles <= Math.max(2, Math.floor(trackedEntries.length * 0.02));
+
+    return almostEverythingMissing && (folderMismatch || previousModeWasLegacy);
   }
 
   async rebuildFromCache(settings: GetNotesPluginSettings): Promise<PluginSyncState> {
@@ -283,4 +307,3 @@ export class SyncEngine {
     }
   }
 }
-

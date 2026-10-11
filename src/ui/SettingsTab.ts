@@ -206,10 +206,11 @@ export class GetNotesSettingTab extends PluginSettingTab {
       text: `最近同步：${formatSyncTime(this.plugin.state.lastSyncAt)}`
     });
     if (summary) {
+      const resultPrefix = this.plugin.isSyncRunning() ? "上次结果" : "最近结果";
       const resultLine =
         summary.mode === "legacy"
-          ? `最近结果：${buildModeLabel(summary.mode)} | ${summary.status} | 导入 ${summary.total ?? summary.added ?? 0}，失败 ${summary.failed ?? 0}`
-          : `最近结果：${buildModeLabel(summary.mode)} | ${summary.status} | 新增 ${summary.added ?? 0}，更新 ${summary.updated ?? 0}，跳过 ${summary.skipped ?? 0}，失败 ${summary.failed ?? 0}`;
+          ? `${resultPrefix}：${buildModeLabel(summary.mode)} | ${summary.status} | 导入 ${summary.total ?? summary.added ?? 0}，失败 ${summary.failed ?? 0}`
+          : `${resultPrefix}：${buildModeLabel(summary.mode)} | ${summary.status} | 新增 ${summary.added ?? 0}，更新 ${summary.updated ?? 0}，跳过 ${summary.skipped ?? 0}，失败 ${summary.failed ?? 0}`;
       summaryEl.createEl("div", { text: resultLine });
       if (summary.stage) {
         summaryEl.createEl("div", {
